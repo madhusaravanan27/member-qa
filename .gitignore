@@ -1,0 +1,11 @@
+# Virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# VSCode and system files
+.vscode/
+.DS_Store
+
+# Bytecode cache
+__pycache__/
