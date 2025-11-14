@@ -43,9 +43,9 @@ _msg_texts: List[str] = []          # indexed message texts
 _msg_meta: List[Dict] = []          # {id, user_name, timestamp}
 _msg_vecs: Optional[np.ndarray] = None  # [N, D] normalized embeddings
 
-# Simple cache of raw messages
-_cache = {"t": 0.0, "data": []}
-CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
+# Raw messages (fetched at startup, reused by /ask)
+_raw_msgs: List[Dict] = []
+
 
 app = FastAPI(title=APP_NAME)
 
@@ -100,21 +100,44 @@ async def fetch_messages_page(skip: int = 0, limit: int = PAGE_LIMIT) -> Dict:
 
 
 async def fetch_all_messages(max_pages: int = MAX_PAGES) -> List[Dict]:
+    """
+    Fetch multiple pages, but stop gracefully on 400/401/404/405 instead of blowing up.
+    This way, we still use whatever data we got from earlier pages.
+    """
     items: List[Dict] = []
     skip = 0
-    for _ in range(max_pages):
-        page = await fetch_messages_page(skip=skip, limit=PAGE_LIMIT)
+
+    for page_idx in range(max_pages):
+        try:
+            page = await fetch_messages_page(skip=skip, limit=PAGE_LIMIT)
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code if e.response is not None else None
+            # Treat these as "no more pages" rather than hard failure
+            if code in (400, 401, 404, 405):
+                logger.warning(
+                    "Stopping pagination at skip=%s due to upstream %s",
+                    skip,
+                    code,
+                )
+                break
+            # Anything else is a real error
+            raise
+
         batch = page.get("items", []) or []
         if not batch:
             break
         items.extend(batch)
+
         if len(batch) < PAGE_LIMIT:
+            # fewer than a full page: likely last page
             break
+
         skip += PAGE_LIMIT
+
     logger.info(
         "Fetched %d messages (pages=%d, page_size=%d)",
         len(items),
-        (skip // PAGE_LIMIT) + 1,
+        (skip // PAGE_LIMIT) + 1 if items else 0,
         PAGE_LIMIT,
     )
     return items
@@ -238,7 +261,7 @@ async def build_index() -> None:
     Build an embedding index over all messages once at startup.
     If it fails, we just skip RAG fallback.
     """
-    global _embedder, _msg_texts, _msg_meta, _msg_vecs
+    global _embedder, _msg_texts, _msg_meta, _msg_vecs, _raw_msgs
 
     try:
         msgs = await fetch_all_messages()
@@ -248,7 +271,10 @@ async def build_index() -> None:
         _msg_vecs = None
         _msg_texts = []
         _msg_meta = []
+        _raw_msgs = []
         return
+
+    _raw_msgs = msgs  # store raw messages for rule-based logic
 
     texts: List[str] = []
     meta: List[Dict] = []
@@ -335,13 +361,15 @@ async def ask(req: AskRequest) -> AskResponse:
     if not q:
         raise HTTPException(status_code=400, detail="Question must not be empty")
 
-    # Use cache to avoid hammering upstream
-    global _cache
-    now = time()
-    if now - _cache["t"] > CACHE_TTL or not _cache["data"]:
+    # Use messages fetched at startup; only refetch if they are missing.
+    global _raw_msgs
+    all_msgs: List[Dict] = _raw_msgs
+
+    if not all_msgs:
+        # Fallback: try once to fetch now
         try:
-            _cache["data"] = await fetch_all_messages()
-            _cache["t"] = now
+            all_msgs = await fetch_all_messages()
+            _raw_msgs = all_msgs
         except httpx.HTTPStatusError as e:
             body = ""
             try:
@@ -361,8 +389,6 @@ async def ask(req: AskRequest) -> AskResponse:
             return AskResponse(
                 answer="Unexpected error fetching messages. Please try again."
             )
-
-    all_msgs: List[Dict] = _cache["data"]
 
     # Intent 1: Trip timing to a city
     m = TRIP_Q_RE.search(q)
