@@ -2,7 +2,6 @@ from __future__ import annotations
 import os
 import re
 import logging
-from time import time
 from typing import Dict, List, Optional
 
 import httpx
@@ -47,6 +46,7 @@ _raw_msgs: List[Dict] = []
 
 app = FastAPI(title=APP_NAME)
 
+
 # -------------------
 # Input / Output Models
 # -------------------
@@ -71,10 +71,8 @@ async def fetch_messages_page(skip: int = 0, limit: int = PAGE_LIMIT) -> Dict:
     """
     base = MESSAGES_API_BASE.rstrip("/")
     if base.endswith("/messages"):
-        # e.g. base = https://.../messages
         url = base
     else:
-        # e.g. base = https://... -> https://.../messages
         url = f"{base}/messages"
 
     async with httpx.AsyncClient(
@@ -104,12 +102,11 @@ async def fetch_all_messages(max_pages: int = MAX_PAGES) -> List[Dict]:
     items: List[Dict] = []
     skip = 0
 
-    for page_idx in range(max_pages):
+    for _ in range(max_pages):
         try:
             page = await fetch_messages_page(skip=skip, limit=PAGE_LIMIT)
         except httpx.HTTPStatusError as e:
             code = e.response.status_code if e.response is not None else None
-            # Treat these as "no more pages" rather than hard failure
             if code in (400, 401, 404, 405):
                 logger.warning(
                     "Stopping pagination at skip=%s due to upstream %s",
@@ -117,7 +114,6 @@ async def fetch_all_messages(max_pages: int = MAX_PAGES) -> List[Dict]:
                     code,
                 )
                 break
-            # Anything else is a real error
             raise
 
         batch = page.get("items", []) or []
@@ -126,7 +122,6 @@ async def fetch_all_messages(max_pages: int = MAX_PAGES) -> List[Dict]:
         items.extend(batch)
 
         if len(batch) < PAGE_LIMIT:
-            # fewer than a full page: likely last page
             break
 
         skip += PAGE_LIMIT
@@ -151,6 +146,11 @@ YESNO_TRIP_Q_RE = re.compile(
     r"(?i)is\s+(.+?)\s+(?:going|traveling|travelling|heading)\s+to\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s*\??\s*$"
 )
 
+# New: generic “tell me something about X’s trip”
+TRIP_SUMMARY_Q_RE = re.compile(
+    r"(?i)tell\s+me\s+something\s+about\s+(.+?)['’]s\s+trip"
+)
+
 CARS_Q_RE = re.compile(r"(?i)how\s+many\s+cars\s+does\s+(.+?)\s+have\??")
 FAV_Q_RE = re.compile(r"(?i)what\s+are\s+(.+?)['’]s\s+favorite\s+restaurants\??")
 
@@ -164,7 +164,6 @@ TRIP_PATTERNS = [
     re.compile(
         r"(?i)\bto\s+(?P<city>[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\b[^\n]*\b(on|around|in|by)\b\s*(?P<when>[A-Za-z0-9 ,./-]+)"
     ),
-    # extra leniency for phrasing like "headed to London next Friday"
     re.compile(
         rf"(?i)\b(?:to|headed to|off to)\s+(?P<city>[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\b.*?\b{DATE_WORDS}\b\s*(?P<when>[A-Za-z0-9 ,./-]+)"
     ),
@@ -181,6 +180,23 @@ FAV_PATTERNS = [
         r"(?i)\b(love|loves|like|likes)\s+(?P<list>(?:[A-Z][\w'&]+(?:\s+[A-Z][\w'&]+)*)(?:\s*,\s*(?:and\s+)?[A-Z][\w'&]+(?:\s+[A-Z][\w'&]+)*)*)"
     ),
 ]
+
+# Generic "favorite things" / likes (not limited to restaurants)
+FAV_THING_PATTERNS = [
+    re.compile(
+        r"(?i)\bfavorite\b\s+(?:thing|things|place|places|items?|stuff|)\s*(?:is|are|:)?\s*(?P<thing>[^.?!,\n]+)"
+    ),
+    re.compile(
+        r"(?i)\b(love|loves|like|likes|adore|enjoy)\b\s+(?P<thing>[^.?!,\n]+)"
+    ),
+]
+
+# For name extraction
+QUESTION_CAP_STOPWORDS = {
+    "What", "When", "Where", "Why", "How", "Who", "Which", "Tell",
+    "Does", "Do", "Did", "Is", "Are", "Was", "Were", "Can", "Could",
+    "Will", "Would", "Should", "May", "Might",
+}
 
 
 # -------------------
@@ -246,6 +262,68 @@ def extract_favorite_restaurants(texts: List[str]) -> Optional[str]:
                         seen.add(k)
                         ordered.append(i)
                 return ", ".join(ordered)
+    return None
+
+
+def extract_generic_favorites(texts: List[str]) -> Optional[str]:
+    """
+    Heuristic extraction of 'favorite things' from a set of messages.
+    """
+    seen = set()
+    items: List[str] = []
+
+    for t in texts:
+        for pat in FAV_THING_PATTERNS:
+            for m in pat.finditer(t):
+                thing = (m.group("thing") or "").strip()
+                if not thing:
+                    continue
+                thing = re.sub(
+                    r"\b(but|though|however|except)\b.*$", "", thing
+                ).strip()
+                thing = re.sub(
+                    r"^(really|so|just|kind of|kinda)\s+",
+                    "",
+                    thing,
+                    flags=re.I,
+                ).strip()
+                if not thing:
+                    continue
+                key = thing.lower()
+                if key not in seen:
+                    seen.add(key)
+                    items.append(thing)
+
+    if not items:
+        return None
+    return "; ".join(items[:5])
+
+
+def extract_name_from_question(q: str) -> Optional[str]:
+    """
+    Try to extract a plausible person name from the question.
+    We want "Ava" from "What restaurants does Ava talk about?"
+    and "Layla" from "Tell me something about Layla's trip".
+    """
+    # 1) Possessive form: Ava's, Layla's, etc.
+    m = re.search(r"(?i)\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)['’]s\b", q)
+    if m:
+        return m.group(1).strip()
+
+    # 2) After common auxiliaries: "does Ava", "is Ava", "are Ava"
+    m = re.search(
+        r"(?i)\b(?:are|is|does|do|did|was|were|can|could|will|would|should|has|have|had)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b",
+        q,
+    )
+    if m:
+        return m.group(1).strip()
+
+    # 3) Last capitalized token that isn't a wh-word / helper
+    caps = re.findall(r"\b([A-Z][a-z]+)\b", q)
+    caps = [c for c in caps if c not in QUESTION_CAP_STOPWORDS]
+    if caps:
+        return caps[-1].strip()
+
     return None
 
 
@@ -358,12 +436,10 @@ async def ask(req: AskRequest) -> AskResponse:
     if not q:
         raise HTTPException(status_code=400, detail="Question must not be empty")
 
-    # Use messages fetched at startup; only refetch if they are missing.
     global _raw_msgs
     all_msgs: List[Dict] = _raw_msgs
 
     if not all_msgs:
-        # Fallback: try once to fetch now
         try:
             all_msgs = await fetch_all_messages()
             _raw_msgs = all_msgs
@@ -383,10 +459,103 @@ async def ask(req: AskRequest) -> AskResponse:
             )
         except Exception as e:
             logger.exception("Unexpected error fetching messages: %s", e)
-            # Slightly more detailed error to help debugging if upstream is weird
             return AskResponse(
                 answer=f"Unexpected error fetching messages: {type(e).__name__}: {e!r}"
             )
+
+    q_lower = q.lower()
+
+    # ---------- Trip summary intent ----------
+    m = TRIP_SUMMARY_Q_RE.search(q)
+    if m:
+        name = m.group(1).strip().rstrip("?.!,")
+        texts = messages_for_user(all_msgs, name)
+        if not texts:
+            return AskResponse(answer=f"I couldn't find any messages for {name}.")
+
+        trip_snips: List[str] = []
+        for t in texts:
+            tl = t.lower()
+            if (
+                "trip" in tl
+                or "flight" in tl
+                or "fly to" in tl
+                or "going to" in tl
+                or "travel to" in tl
+            ):
+                trip_snips.append(t.strip())
+            if len(trip_snips) >= 3:
+                break
+
+        if not trip_snips:
+            return AskResponse(
+                answer=f"I couldn't find any detailed trip messages for {name}."
+            )
+
+        joined = " | ".join(trip_snips)
+        return AskResponse(
+            answer=f"Here are some details mentioned about {name}'s trip: {joined}"
+        )
+
+    # ---------- Generic "favorite things" ----------
+    if "favorite" in q_lower and "restaurant" not in q_lower:
+        name = extract_name_from_question(q)
+        if name:
+            texts_user = messages_for_user(all_msgs, name)
+            # Also pull top similar messages and keep only that user, if any
+            cands = retrieve_similar_messages(q, user_hint=name, k=EMBED_K)
+            cand_texts = [
+                c["text"]
+                for c in cands
+                if NAME_NORM(name) in NAME_NORM(c.get("user_name") or "")
+            ]
+            texts = texts_user + cand_texts
+            if texts:
+                favs = extract_generic_favorites(texts)
+                if favs:
+                    return AskResponse(
+                        answer=f"{name}'s favorite things mentioned in the messages include: {favs}."
+                    )
+                else:
+                    return AskResponse(
+                        answer=f"I couldn't infer specific favorite things for {name} from the messages."
+                    )
+
+    # ---------- Looser restaurant intent ----------
+    if "restaurant" in q_lower or "restaurants" in q_lower:
+        name = extract_name_from_question(q)
+        if name:
+            texts = messages_for_user(all_msgs, name)
+            if not texts:
+                return AskResponse(answer=f"I couldn't find any messages for {name}.")
+
+            favs = extract_favorite_restaurants(texts)
+            if favs:
+                return AskResponse(
+                    answer=f"{name} talks about these restaurants: {favs}."
+                )
+
+            restaurant_snips: List[str] = []
+            for t in texts:
+                tl = t.lower()
+                if (
+                    "restaurant" in tl
+                    or "dinner" in tl
+                    or "table at" in tl
+                    or "reservation" in tl
+                ):
+                    restaurant_snips.append(t.strip())
+                if len(restaurant_snips) >= 3:
+                    break
+
+            if restaurant_snips:
+                joined = " | ".join(restaurant_snips)
+                return AskResponse(
+                    answer=(
+                        f"I couldn't extract a clean restaurant list, but here are some "
+                        f"restaurant-related messages for {name}: {joined}"
+                    )
+                )
 
     # Intent 1: Trip timing to a city
     m = TRIP_Q_RE.search(q)
@@ -441,7 +610,7 @@ async def ask(req: AskRequest) -> AskResponse:
         count = extract_car_count(texts)
         return AskResponse(answer=count or f"I couldn't infer car ownership for {name}.")
 
-    # Intent 3: Favorite restaurants
+    # Intent 3: Favorite restaurants (strict phrasing)
     m = FAV_Q_RE.search(q)
     if m:
         name = m.group(1).strip().rstrip("?.!,")
@@ -454,18 +623,13 @@ async def ask(req: AskRequest) -> AskResponse:
         )
 
     # -------------------
-    # RAG-lite fallback
+    # RAG-lite fallback (for these 3 domains only)
     # -------------------
-    user_hint = None
-    name_match = re.search(r"(?i)\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", q)
-    if name_match:
-        user_hint = name_match.group(1)
-
+    user_hint = extract_name_from_question(q)
     candidates = retrieve_similar_messages(q, user_hint=user_hint, k=EMBED_K)
     texts = [c["text"] for c in candidates]
 
     if texts:
-        # Trip: infer city from question if present
         city_match = re.search(
             r"(?i)\bto\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\b", q
         )
@@ -483,16 +647,68 @@ async def ask(req: AskRequest) -> AskResponse:
         if favs:
             return AskResponse(answer=favs)
 
-        # If nothing parsed but we have candidates, return a snippet
         snippet = texts[0]
         return AskResponse(answer=snippet[:220])
 
-    # Final fallback
     return AskResponse(
         answer="I couldn't understand the question. Ask about trips to a city, car counts, or favorite restaurants."
     )
 
 
+@app.post("/ask_generic", response_model=AskResponse)
+async def ask_generic(req: AskRequest) -> AskResponse:
+    """
+    Generic RAG-based Q&A endpoint.
+    """
+    q = (req.question or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Question must not be empty")
+
+    if _embedder is None or _msg_vecs is None or not _msg_texts:
+        try:
+            await build_index()
+        except Exception as e:
+            logger.exception("Failed to (re)build embedding index: %s", e)
+            return AskResponse(
+                answer="Search index is not available right now. Please try again later."
+            )
+        if _embedder is None or _msg_vecs is None:
+            return AskResponse(
+                answer="Search index is not available right now. Please try again later."
+            )
+
+    user_hint = extract_name_from_question(q)
+    candidates = retrieve_similar_messages(q, user_hint=user_hint, k=EMBED_K)
+    if not candidates:
+        return AskResponse(
+            answer="I couldn't find anything in the messages that looked relevant to your question."
+        )
+
+    top = candidates[:3]
+    lines = []
+    for c in top:
+        uname = c.get("user_name") or "Unknown user"
+        text = (c.get("text") or "").strip()
+        if not text:
+            continue
+        lines.append(f"- [{uname}] {text}")
+
+    if not lines:
+        return AskResponse(
+            answer="I couldn't find anything in the messages that looked relevant to your question."
+        )
+
+    answer = (
+        "Here are some messages that may answer your question or provide context:\n"
+        + "\n".join(lines)
+    )
+    return AskResponse(answer=answer)
+
+
 @app.get("/")
 async def root():
-    return {"service": APP_NAME, "endpoints": ["/ask"], "status": "ok"}
+    return {
+        "service": APP_NAME,
+        "endpoints": ["/ask", "/ask_generic"],
+        "status": "ok",
+    }
