@@ -1,39 +1,115 @@
-# Member QA – Data Insights
+# Member QA – Design Notes and Data Insights
 
-This document summarizes the results of analyzing the member message dataset used by the Q&A system. The goal was to identify inconsistencies, unusual patterns, or structural issues.
+This document summarizes both the system design decisions and the findings from analyzing the member message dataset.
 
-## 1. Overview
+## Design Notes
 
-A total of 600 messages were fetched from the upstream API. Basic checks showed that the dataset is clean and consistent.
+This project required building a question-answering system over a collection of member messages. Several approaches were evaluated before choosing the final solution.
 
-Key findings:
+### 1. Pure Rule-Based Extraction
+
+The simplest approach was to rely entirely on regex patterns to detect questions about trips, restaurants, or car counts.
+
+**Advantages**
+- Fast  
+- Deterministic  
+- Easy to debug  
+
+**Limitations**
+- Breaks when phrasing changes  
+- Does not scale to new question types  
+- Not suitable for open-ended or conversational queries  
+
+This approach alone was too brittle.
+
+### 2. Full Retrieval-Augmented Generation (RAG) With an LLM
+
+Another option was to embed messages, retrieve relevant ones, and let an LLM generate the answer.
+
+**Advantages**
+- Handles natural language variations well  
+- Very flexible  
+- Works for almost any question type  
+
+**Limitations**
+- Not allowed for this assignment  
+- Requires larger infrastructure  
+- More complex than needed  
+
+This was rejected due to project constraints.
+
+### 3. Hybrid “RAG-Lite” Approach (Final Choice)
+
+The final design combines two techniques:
+
+- Rule-based logic for well-defined patterns (trip timing, car count, restaurants)  
+- Embedding-based semantic retrieval for everything else  
+
+This allows precise answers when the question is structured, and relevant context when the question is open-ended.
+
+**Advantages**
+- More reliable than pure regex  
+- Lightweight and easy to deploy  
+- Does not require generative models  
+- Tolerant to varied question phrasing  
+
+This approach offered the best balance of simplicity and robustness.
+
+### 4. Intent Classifier (Considered but Not Used)
+
+A model could classify questions into categories.
+
+**Advantages**
+- More flexible than regex  
+- Learns patterns automatically  
+
+**Limitations**
+- Requires labeled training data  
+- Still needs extraction logic for answers  
+
+Due to lack of labeled data, this option was not selected.
+
+### 5. Final Decision Summary
+
+The hybrid RAG-Lite solution was chosen because it meets all project requirements, handles both structured and natural questions, and avoids unnecessary complexity.
+
+---
+
+## Data Insights
+
+As part of the project, the dataset was analyzed to check for anomalies, inconsistencies, and general structure.
+
+### 1. Dataset Overview
+
+A total of 600 messages were fetched from the upstream API. Basic validation showed:
+
 - No missing user names  
-- No missing message text  
-- No duplicate message IDs  
+- No missing messages  
+- No duplicate IDs  
 - No invalid timestamps  
-- No empty or extremely short messages  
-- No abnormally long messages  
+- No extremely short or extremely long messages  
 
-This already sets a strong baseline for reliable analysis.
+The dataset is clean and well-structured.
 
-## 2. Message Length Patterns
+### 2. Message Length Patterns
 
-Message lengths fall into a natural conversational range. There were:
-- 0 messages with 5 characters or fewer  
-- 0 messages with 20 characters or fewer  
-- 0 extremely long messages (500+ characters)  
+All messages fell into normal conversational ranges:
 
-This suggests the dataset does not contain noise, spam, or broken entries.
+- 0 messages with 5 or fewer characters  
+- 0 messages with 20 or fewer characters  
+- 0 messages with 500 or more characters  
 
-## 3. Timestamp Checks
+There was no spam, placeholder text, or corrupted entries.
 
-The timestamps ranged from November 2024 to November 2025. All values were valid, in order, and consistently formatted. There were no timezone conflicts or invalid date formats.
+### 3. Timestamp Validation
 
-This means the dataset can support future extensions such as timeline-based queries.
+The timestamps ranged from November 2024 to November 2025. All timestamps were valid and well-formatted with no inconsistencies.
 
-## 4. User Activity Distribution
+This means the dataset supports timeline-based features if needed.
 
-Message activity is not evenly distributed across users. The most active users were:
+### 4. User Activity Distribution
+
+Message activity is uneven across users. The most active users were:
 
 - Vikram Desai (70 messages)  
 - Sophia Al-Farsi (66 messages)  
@@ -41,21 +117,22 @@ Message activity is not evenly distributed across users. The most active users w
 - Lily O’Sullivan (60 messages)  
 - Fatima El-Tahir (59 messages)  
 
-A small group of members contributes a large share of the content.
+A small group of members contributes a large portion of the dataset.  
+This affects retrieval density: more active users produce stronger semantic context.
 
-This affects retrieval quality: users with many messages produce strong context, while users with only a few messages may have weaker retrieval signals.
-
-## 5. Structural Consistency
+### 5. Structural Consistency
 
 There were no issues with:
-- Invalid IDs  
-- Encoding problems  
-- Incorrectly formatted fields  
+
+- Invalid message IDs  
+- Field formatting  
+- Encoding  
 - Missing fields  
 - Duplicate timestamps  
 
-Given the uniformity and structure, the dataset appears to be curated or synthetically generated.
+The dataset appears either curated or synthetically generated due to its cleanliness.
 
-## 6. Final Observations
+### 6. Final Observations
 
-Overall, the dataset is very clean. The main pattern worth noting is uneven user activity, which affects how well retrieval performs for different users. Aside from that, no major anomalies were detected.
+The dataset is high-quality and shows no structural flaws.  
+The only notable characteristic is the uneven distribution of messages across users, which influences retrieval performance.
