@@ -19,9 +19,15 @@ logging.basicConfig(level=logging.INFO)
 APP_NAME = "member-qa"
 
 # IMPORTANT: default to the exact host they gave (HTTPS, no extra path)
-MESSAGES_API_BASE = os.getenv(
-    "MESSAGES_API_BASE",
-    "https://november7-730026606190.europe-west1.run.app",
+# Also strip / clean any stray whitespace / newlines
+MESSAGES_API_BASE = (
+    os.getenv(
+        "MESSAGES_API_BASE",
+        "https://november7-730026606190.europe-west1.run.app",
+    )
+    .strip()
+    .replace("\n", "")
+    .replace("\r", "")
 )
 
 TIMEOUT = float(os.getenv("MESSAGES_API_TIMEOUT", "25"))
@@ -66,14 +72,23 @@ async def fetch_messages_page(skip: int = 0, limit: int = PAGE_LIMIT) -> Dict:
     Fetch one page from the upstream /messages endpoint.
 
     We are defensive about MESSAGES_API_BASE:
+    - Strip whitespace / newlines.
     - If it already ends with /messages or /messages/, we don't append again.
     - Otherwise, we append /messages.
     """
-    base = MESSAGES_API_BASE.rstrip("/")
+    raw_base = MESSAGES_API_BASE or ""
+    cleaned_base = raw_base.strip().replace("\n", "").replace("\r", "")
+
+    if not cleaned_base:
+        raise RuntimeError("MESSAGES_API_BASE is empty or invalid after cleaning")
+
+    base = cleaned_base.rstrip("/")
     if base.endswith("/messages"):
         url = base
     else:
         url = f"{base}/messages"
+
+    logger.info("Using upstream messages URL: %r", url)
 
     async with httpx.AsyncClient(
         timeout=TIMEOUT,
@@ -302,15 +317,11 @@ def extract_generic_favorites(texts: List[str]) -> Optional[str]:
 def extract_name_from_question(q: str) -> Optional[str]:
     """
     Try to extract a plausible person name from the question.
-    We want "Ava" from "What restaurants does Ava talk about?"
-    and "Layla" from "Tell me something about Layla's trip".
     """
-    # 1) Possessive form: Ava's, Layla's, etc.
     m = re.search(r"(?i)\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)['’]s\b", q)
     if m:
         return m.group(1).strip()
 
-    # 2) After common auxiliaries: "does Ava", "is Ava", "are Ava"
     m = re.search(
         r"(?i)\b(?:are|is|does|do|did|was|were|can|could|will|would|should|has|have|had)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b",
         q,
@@ -318,7 +329,6 @@ def extract_name_from_question(q: str) -> Optional[str]:
     if m:
         return m.group(1).strip()
 
-    # 3) Last capitalized token that isn't a wh-word / helper
     caps = re.findall(r"\b([A-Z][a-z]+)\b", q)
     caps = [c for c in caps if c not in QUESTION_CAP_STOPWORDS]
     if caps:
@@ -378,7 +388,6 @@ async def build_index() -> None:
     _msg_texts = texts
     _msg_meta = meta
 
-    # L2-normalize for cosine similarity
     norms = np.linalg.norm(_msg_vecs, axis=1, keepdims=True) + 1e-12
     _msg_vecs /= norms
 
@@ -399,7 +408,7 @@ def retrieve_similar_messages(
     qv = np.array(q_vec, dtype=np.float32)
     qv /= (np.linalg.norm(qv) + 1e-12)
 
-    sims = _msg_vecs @ qv  # cosine similarity
+    sims = _msg_vecs @ qv
 
     n = len(sims)
     if n == 0:
@@ -502,7 +511,6 @@ async def ask(req: AskRequest) -> AskResponse:
         name = extract_name_from_question(q)
         if name:
             texts_user = messages_for_user(all_msgs, name)
-            # Also pull top similar messages and keep only that user, if any
             cands = retrieve_similar_messages(q, user_hint=name, k=EMBED_K)
             cand_texts = [
                 c["text"]
