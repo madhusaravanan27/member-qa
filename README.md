@@ -136,3 +136,11 @@ The dataset appears either curated or synthetically generated due to its cleanli
 
 The dataset is high-quality and shows no structural flaws.  
 The only notable characteristic is the uneven distribution of messages across users, which influences retrieval performance.
+
+### Outputs:
+<img width="878" height="278" alt="image" src="https://github.com/user-attachments/assets/ba847d57-a81c-4e70-8bdb-6f703a07fb97" />
+
+<img width="873" height="217" alt="image" src="https://github.com/user-attachments/assets/fe7ab9dc-db5a-430c-b7c4-738ec7d5381e" />
+
+
+
