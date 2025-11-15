@@ -13,7 +13,7 @@ One option was to rely entirely on regex-based extraction for identifying questi
 
 ### 2. Full Retrieval-Augmented Generation (RAG) With an LLM
 
-A full RAG pipeline—embedding messages, retrieving documents, and using an LLM to write final answers—was also considered. This would have provided excellent natural language understanding and wide coverage. However, it was beyond the scope and constraints of this assignment, required heavier compute, and introduced unnecessary complexity. Thus, it was not selected.
+A full RAG pipeline-embedding messages, retrieving documents, and using an LLM to write final answers-was also considered. This would have provided excellent natural language understanding and wide coverage. However, it was beyond the scope and constraints of this assignment, required heavier compute, and introduced unnecessary complexity. Thus, it was not selected.
 
 ### 3. Hybrid “RAG-Lite” Approach (Final Choice)
 
