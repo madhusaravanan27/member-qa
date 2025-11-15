@@ -137,10 +137,36 @@ The dataset appears either curated or synthetically generated due to its cleanli
 The dataset is high-quality and shows no structural flaws.  
 The only notable characteristic is the uneven distribution of messages across users, which influences retrieval performance.
 
-### Outputs:
+## API Endpoints
+
+### `/ask`
+Handles **structured, intent-based** queries such as:
+- Trip details  
+- Trip summaries  
+- Yes/No travel questions  
+- Car counts  
+- Favorite restaurants  
+- Favorite things  
+
+Uses rule-based extraction first, and falls back to semantic retrieval for these same domains.
+
+### `/ask_generic`
+A general semantic-search endpoint that retrieves top relevant messages for any open-ended question.
+
+**When to use which**
+- Use `/ask` for questions about trips, cars, restaurants, or favorites  
+- Use `/ask_generic` for broad or exploratory questions  
+
+## Outputs:
 <img width="878" height="278" alt="image" src="https://github.com/user-attachments/assets/ba847d57-a81c-4e70-8bdb-6f703a07fb97" />
 
 <img width="873" height="217" alt="image" src="https://github.com/user-attachments/assets/fe7ab9dc-db5a-430c-b7c4-738ec7d5381e" />
+
+<img width="883" height="229" alt="image" src="https://github.com/user-attachments/assets/13b9ee71-ffb3-4636-8136-ae58d4c34836" />
+
+<img width="857" height="237" alt="image" src="https://github.com/user-attachments/assets/27a052b7-f25b-4bf6-875f-f9296fd26e77" />
+
+
 
 
 
